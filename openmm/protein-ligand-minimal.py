@@ -9,8 +9,10 @@ import copy
 from pathlib import Path
 import logging
 import numpy as np
+import mdtraj
 from openmm import MonteCarloBarostat, LangevinMiddleIntegrator, XmlSerializer
-from openmm.app import Modeller, PME, HBonds, Simulation, CheckpointReporter, StateDataReporter, DCDReporter
+from openmm.app import Modeller, PME, HBonds, Simulation, CheckpointReporter, StateDataReporter, DCDReporter, PDBFile
+from openmm import unit
 from openff.toolkit import Molecule
 from openmmforcefields.generators import SystemGenerator
 
@@ -42,9 +44,6 @@ def create_complex(receptor_path: Path | str, ligands_path: Path | str):
 
     Note: It always takes the first available conformer for the ligands.
     """
-    import mdtraj
-    from openmm.app import PDBFile
-    import openmm.unit as unit
     # Make sure we are dealing with Path objects
     receptor_path = Path(receptor_path)
     ligands_path = Path(ligands_path)
