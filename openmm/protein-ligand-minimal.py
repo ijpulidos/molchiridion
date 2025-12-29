@@ -110,6 +110,7 @@ periodic_forcefield_kwargs = {"nonbondedMethod": PME}
 barostat = MonteCarloBarostat(pressure, temperature, barostat_period)
 forcefields_list = ['amber/ff14SB.xml', 'amber/tip3p_standard.xml', 'amber/tip3p_HFE_multivalent.xml']
 small_molecule_forcefield = "openff-2.1.0"
+# small_molecule_forcefield = "espaloma-0.3.2"  # for espaloma
 
 # Generate OpenMM system
 system_generator = SystemGenerator(forcefields=forcefields_list, forcefield_kwargs=forcefield_kwargs, 
