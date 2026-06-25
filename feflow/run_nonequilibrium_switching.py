@@ -13,12 +13,26 @@ Usage
     python run_nonequilibrium_switching.py \
         --ligand-a ligA.sdf --ligand-b ligB.sdf --protein protein.pdb --solvate \
         --platform CUDA --output-dir results/
+    python run_nonequilibrium_switching.py \
+        --molecules ligands.sdf --protein protein.pdb \
+        --transformation-index 0 --platform CUDA --output-dir results/
 """
 
 import argparse
+from functools import partial
 from pathlib import Path
 
+from rdkit import Chem
 import gufe
+import openfe
+import kartograf
+from kartograf.filters import (
+    filter_ringbreak_changes,
+    filter_ringsize_changes,
+    filter_whole_rings_only,
+)
+from openff.toolkit import RDKitToolkitWrapper
+from openff.toolkit.utils.toolkit_registry import toolkit_registry_manager, ToolkitRegistry
 from openff.units import unit
 
 
@@ -42,10 +56,72 @@ def build_default_benzene_toluene_systems():
 
 def build_mapping(component_a, component_b):
     """Atom mapping between two SmallMoleculeComponents via Kartograf."""
-    from kartograf import KartografAtomMapper
-
-    atom_mapper = KartografAtomMapper()
+    atom_mapper = kartograf.KartografAtomMapper()
     return next(atom_mapper.suggest_mappings(component_a, component_b))
+
+
+def gen_charges(smc):
+    """Assign NAGL partial charges using the RDKit backend."""
+    rdkit_registry = ToolkitRegistry([RDKitToolkitWrapper()])
+    offmol = smc.to_openff()
+    with toolkit_registry_manager(rdkit_registry):
+        offmol.assign_partial_charges("nagl", use_conformers=offmol.conformers)
+    return openfe.SmallMoleculeComponent.from_openff(offmol)
+
+
+def gen_ligand_network(smcs):
+    """Generate a LOMAP ligand network with Kartograf atom mapping."""
+    mapping_filters = [
+        filter_ringbreak_changes,
+        filter_ringsize_changes,
+        filter_whole_rings_only,
+    ]
+    mapper = kartograf.KartografAtomMapper(
+        atom_map_hydrogens=True,
+        additional_mapping_filter_functions=mapping_filters,
+    )
+    scorer = partial(openfe.lomap_scorers.default_lomap_score, charge_changes_score=0.1)
+    ligand_network = openfe.ligand_network_planning.generate_lomap_network(
+        molecules=smcs, mappers=mapper, scorer=scorer
+    )
+    if not ligand_network.is_connected():
+        raise ValueError("Generated ligand network is not connected.")
+    return ligand_network
+
+
+def build_network_systems(molecules_path, protein_path, transformation_index):
+    """Load a multi-ligand SDF, build a LOMAP network, return the selected transformation."""
+    rdmols = [m for m in Chem.SDMolSupplier(str(molecules_path), removeHs=False)]
+    smcs = [openfe.SmallMoleculeComponent.from_rdkit(m) for m in rdmols]
+
+    print(f"Generating NAGL partial charges for {len(smcs)} ligand(s)...")
+    smcs = [gen_charges(smc) for smc in smcs]
+
+    ligand_network = gen_ligand_network(smcs)
+    edges = list(ligand_network.edges)
+    print(f"Network has {len(edges)} edge(s). Selecting index {transformation_index}.")
+    if transformation_index >= len(edges):
+        raise SystemExit(
+            f"--transformation-index {transformation_index} is out of range "
+            f"(network has {len(edges)} edge(s))."
+        )
+
+    mapping = edges[transformation_index]
+    comp_a = mapping.componentA
+    comp_b = mapping.componentB
+
+    solvent = gufe.SolventComponent(positive_ion="Na", negative_ion="Cl")
+    components_a = {"ligand": comp_a, "solvent": solvent}
+    components_b = {"ligand": comp_b, "solvent": solvent}
+
+    if protein_path:
+        protein = gufe.ProteinComponent.from_pdb_file(protein_path)
+        components_a["protein"] = protein
+        components_b["protein"] = protein
+
+    state_a = gufe.ChemicalSystem(components_a)
+    state_b = gufe.ChemicalSystem(components_b)
+    return state_a, state_b, comp_a, comp_b, mapping
 
 
 def build_custom_systems(ligand_a_path, ligand_b_path, protein_path, solvate):
@@ -72,10 +148,12 @@ def build_custom_systems(ligand_a_path, ligand_b_path, protein_path, solvate):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ligand-a", type=str, default=None, help="SDF file for ligand A (state A)")
-    parser.add_argument("--ligand-b", type=str, default=None, help="SDF file for ligand B (state B)")
+    parser.add_argument("--molecules", type=str, default=None, help="SDF file with multiple ligands; triggers network mode")
+    parser.add_argument("--ligand-a", type=str, default=None, help="SDF file for ligand A (single-pair mode)")
+    parser.add_argument("--ligand-b", type=str, default=None, help="SDF file for ligand B (single-pair mode)")
     parser.add_argument("--protein", type=str, default=None, help="PDB file for a shared protein component")
     parser.add_argument("--solvate", action="store_true", help="Add a NaCl solvent component (forced on if --protein is given)")
+    parser.add_argument("--transformation-index", type=int, default=0, help="Index of the edge to run from the generated ligand network (network mode only)")
 
     parser.add_argument("--num-switches", type=int, default=1, help="Number of forward/reverse NEQ switch replicates")
     parser.add_argument("--eq-steps", type=int, default=250, help="Internal equilibration steps per endpoint")
@@ -87,16 +165,23 @@ def main():
     args = parser.parse_args()
 
     # --- Build chemical systems + mapping -------------------------------
-    if args.ligand_a or args.ligand_b:
+    if args.molecules and (args.ligand_a or args.ligand_b):
+        parser.error("--molecules cannot be combined with --ligand-a / --ligand-b")
+
+    if args.molecules:
+        state_a, state_b, comp_a, comp_b, mapping = build_network_systems(
+            args.molecules, args.protein, args.transformation_index
+        )
+    elif args.ligand_a or args.ligand_b:
         if not (args.ligand_a and args.ligand_b):
             parser.error("--ligand-a and --ligand-b must be given together")
         state_a, state_b, comp_a, comp_b = build_custom_systems(
             args.ligand_a, args.ligand_b, args.protein, args.solvate
         )
+        mapping = build_mapping(comp_a, comp_b)
     else:
         state_a, state_b, comp_a, comp_b = build_default_benzene_toluene_systems()
-
-    mapping = build_mapping(comp_a, comp_b)
+        mapping = build_mapping(comp_a, comp_b)
 
     # --- Build protocol settings -----------------------------------------
     from feflow.protocols import NonEquilibriumSwitchingProtocol
