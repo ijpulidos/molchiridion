@@ -38,7 +38,8 @@ from kartograf.filters import (
     filter_ringsize_changes,
     filter_whole_rings_only,
 )
-from openff.toolkit import RDKitToolkitWrapper
+from openff.toolkit import RDKitToolkitWrapper, AmberToolsToolkitWrapper
+from openff.toolkit.utils.nagl_wrapper import NAGLToolkitWrapper
 from openff.toolkit.utils.toolkit_registry import toolkit_registry_manager, ToolkitRegistry
 from openff.units import unit
 
@@ -67,12 +68,15 @@ def build_mapping(component_a, component_b):
     return next(atom_mapper.suggest_mappings(component_a, component_b))
 
 
-def gen_charges(smc):
-    """Assign NAGL partial charges using the RDKit backend."""
-    rdkit_registry = ToolkitRegistry([RDKitToolkitWrapper()])
+def gen_charges(smc, method="am1bcc"):
+    """Assign partial charges using am1bcc (RDKit + AmberTools) or nagl (NAGLToolkitWrapper)."""
     offmol = smc.to_openff()
-    with toolkit_registry_manager(rdkit_registry):
-        offmol.assign_partial_charges("nagl", use_conformers=offmol.conformers)
+    if method == "nagl":
+        registry = ToolkitRegistry([NAGLToolkitWrapper()])
+    else:
+        registry = ToolkitRegistry([RDKitToolkitWrapper(), AmberToolsToolkitWrapper()])
+    with toolkit_registry_manager(registry):
+        offmol.assign_partial_charges(method, use_conformers=offmol.conformers)
     return openfe.SmallMoleculeComponent.from_openff(offmol)
 
 
@@ -96,13 +100,14 @@ def gen_ligand_network(smcs):
     return ligand_network
 
 
-def plan_alchemical_network(molecules_path, protein_path, protocol):
+def plan_alchemical_network(molecules_path, protein_path, protocol, charge_method="am1bcc"):
     """Load a multi-ligand SDF, build a LOMAP network, return the full AlchemicalNetwork."""
     rdmols = [m for m in Chem.SDMolSupplier(str(molecules_path), removeHs=False)]
     smcs = [openfe.SmallMoleculeComponent.from_rdkit(m) for m in rdmols]
 
-    print(f"Generating NAGL partial charges for {len(smcs)} ligand(s)...")
-    smcs = [gen_charges(smc) for smc in smcs]
+    method_label = "NAGL" if charge_method == "nagl" else "AM1BCC (AmberTools)"
+    print(f"Generating {method_label} partial charges for {len(smcs)} ligand(s)...")
+    smcs = [gen_charges(smc, method=charge_method) for smc in smcs]
 
     ligand_network = gen_ligand_network(smcs)
     edges = list(ligand_network.edges)
@@ -176,6 +181,7 @@ def main():
     parser.add_argument("--protein", type=str, default=None, help="PDB file for a shared protein component")
     parser.add_argument("--solvate", action="store_true", help="Add a NaCl solvent component (forced on if --protein is given)")
     parser.add_argument("--transformation-index", type=int, default=0, help="Index of the transformation to run from the network (network mode only)")
+    parser.add_argument("--charge-method", type=str, default="am1bcc", choices=["am1bcc", "nagl"], help="Partial charge method used when planning the network (default: am1bcc)")
 
     parser.add_argument("--num-switches", type=int, default=1, help="Number of forward/reverse NEQ switch replicates")
     parser.add_argument("--eq-steps", type=int, default=250, help="Internal equilibration steps per endpoint")
@@ -214,7 +220,7 @@ def main():
                 print(f"Loading alchemical network from {network_json} ...")
                 alchemical_network = load_alchemical_network(network_json)
             else:
-                alchemical_network = plan_alchemical_network(args.molecules, args.protein, protocol)
+                alchemical_network = plan_alchemical_network(args.molecules, args.protein, protocol, charge_method=args.charge_method)
                 if network_json:
                     save_alchemical_network(alchemical_network, network_json)
                     print(f"Alchemical network saved to {network_json}")
