@@ -75,7 +75,7 @@ def gen_charges(smc, method="am1bcc"):
         import openff.nagl_models
         # NAGLToolkitWrapper expects a model path or filename, not the string "nagl"
         model_path = openff.nagl_models.list_available_nagl_models()[-1]
-        registry = ToolkitRegistry([NAGLToolkitWrapper()])
+        registry = ToolkitRegistry([NAGLToolkitWrapper(), RDKitToolkitWrapper()])
         with toolkit_registry_manager(registry):
             offmol.assign_partial_charges(str(model_path), use_conformers=offmol.conformers)
     else:
