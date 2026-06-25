@@ -16,13 +16,20 @@ Usage
     python run_nonequilibrium_switching.py \
         --molecules ligands.sdf --protein protein.pdb \
         --transformation-index 0 --platform CUDA --output-dir results/
+    python run_nonequilibrium_switching.py \
+        --molecules ligands.sdf --protein protein.pdb \
+        --network-json network.json --plan-only
+    python run_nonequilibrium_switching.py \
+        --network-json network.json --transformation-index 1 --platform CUDA
 """
 
 import argparse
 from functools import partial
+import json
 from pathlib import Path
 
 from rdkit import Chem
+from gufe import tokenization
 import gufe
 import openfe
 import kartograf
@@ -89,8 +96,8 @@ def gen_ligand_network(smcs):
     return ligand_network
 
 
-def build_network_systems(molecules_path, protein_path, transformation_index):
-    """Load a multi-ligand SDF, build a LOMAP network, return the selected transformation."""
+def plan_alchemical_network(molecules_path, protein_path, protocol):
+    """Load a multi-ligand SDF, build a LOMAP network, return the full AlchemicalNetwork."""
     rdmols = [m for m in Chem.SDMolSupplier(str(molecules_path), removeHs=False)]
     smcs = [openfe.SmallMoleculeComponent.from_rdkit(m) for m in rdmols]
 
@@ -99,29 +106,42 @@ def build_network_systems(molecules_path, protein_path, transformation_index):
 
     ligand_network = gen_ligand_network(smcs)
     edges = list(ligand_network.edges)
-    print(f"Network has {len(edges)} edge(s). Selecting index {transformation_index}.")
-    if transformation_index >= len(edges):
-        raise SystemExit(
-            f"--transformation-index {transformation_index} is out of range "
-            f"(network has {len(edges)} edge(s))."
-        )
-
-    mapping = edges[transformation_index]
-    comp_a = mapping.componentA
-    comp_b = mapping.componentB
+    print(f"Ligand network has {len(edges)} edge(s).")
 
     solvent = gufe.SolventComponent(positive_ion="Na", negative_ion="Cl")
-    components_a = {"ligand": comp_a, "solvent": solvent}
-    components_b = {"ligand": comp_b, "solvent": solvent}
+    protein = gufe.ProteinComponent.from_pdb_file(protein_path) if protein_path else None
 
-    if protein_path:
-        protein = gufe.ProteinComponent.from_pdb_file(protein_path)
-        components_a["protein"] = protein
-        components_b["protein"] = protein
+    transformations = []
+    for mapping in edges:
+        comp_a = mapping.componentA
+        comp_b = mapping.componentB
+        components_a = {"ligand": comp_a, "solvent": solvent}
+        components_b = {"ligand": comp_b, "solvent": solvent}
+        if protein is not None:
+            components_a["protein"] = protein
+            components_b["protein"] = protein
+        transformations.append(
+            openfe.Transformation(
+                stateA=openfe.ChemicalSystem(components_a),
+                stateB=openfe.ChemicalSystem(components_b),
+                mapping=mapping,
+                protocol=protocol,
+                name=f"{comp_a.name}_{comp_b.name}",
+            )
+        )
 
-    state_a = gufe.ChemicalSystem(components_a)
-    state_b = gufe.ChemicalSystem(components_b)
-    return state_a, state_b, comp_a, comp_b, mapping
+    return openfe.AlchemicalNetwork(transformations)
+
+
+def save_alchemical_network(network, path):
+    with open(path, "w") as f:
+        json.dump(network.to_dict(), f, cls=tokenization.JSON_HANDLER.encoder)
+
+
+def load_alchemical_network(path):
+    with open(path) as f:
+        data = json.load(f, cls=tokenization.JSON_HANDLER.decoder)
+    return openfe.AlchemicalNetwork.from_dict(data)
 
 
 def build_custom_systems(ligand_a_path, ligand_b_path, protein_path, solvate):
@@ -148,12 +168,14 @@ def build_custom_systems(ligand_a_path, ligand_b_path, protein_path, solvate):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--molecules", type=str, default=None, help="SDF file with multiple ligands; triggers network mode")
+    parser.add_argument("--molecules", type=str, default=None, help="SDF file with multiple ligands; triggers network planning mode")
+    parser.add_argument("--network-json", type=str, default=None, help="Path to save/load the alchemical network JSON; if the file exists it is loaded instead of replanning")
+    parser.add_argument("--plan-only", action="store_true", help="Plan the alchemical network and save it (requires --molecules), then exit without running")
     parser.add_argument("--ligand-a", type=str, default=None, help="SDF file for ligand A (single-pair mode)")
     parser.add_argument("--ligand-b", type=str, default=None, help="SDF file for ligand B (single-pair mode)")
     parser.add_argument("--protein", type=str, default=None, help="PDB file for a shared protein component")
     parser.add_argument("--solvate", action="store_true", help="Add a NaCl solvent component (forced on if --protein is given)")
-    parser.add_argument("--transformation-index", type=int, default=0, help="Index of the edge to run from the generated ligand network (network mode only)")
+    parser.add_argument("--transformation-index", type=int, default=0, help="Index of the transformation to run from the network (network mode only)")
 
     parser.add_argument("--num-switches", type=int, default=1, help="Number of forward/reverse NEQ switch replicates")
     parser.add_argument("--eq-steps", type=int, default=250, help="Internal equilibration steps per endpoint")
@@ -164,26 +186,13 @@ def main():
 
     args = parser.parse_args()
 
-    # --- Build chemical systems + mapping -------------------------------
-    if args.molecules and (args.ligand_a or args.ligand_b):
-        parser.error("--molecules cannot be combined with --ligand-a / --ligand-b")
+    # --- Validate arg combinations ---------------------------------------
+    if (args.molecules or args.network_json) and (args.ligand_a or args.ligand_b):
+        parser.error("--molecules / --network-json cannot be combined with --ligand-a / --ligand-b")
+    if args.plan_only and not args.molecules:
+        parser.error("--plan-only requires --molecules")
 
-    if args.molecules:
-        state_a, state_b, comp_a, comp_b, mapping = build_network_systems(
-            args.molecules, args.protein, args.transformation_index
-        )
-    elif args.ligand_a or args.ligand_b:
-        if not (args.ligand_a and args.ligand_b):
-            parser.error("--ligand-a and --ligand-b must be given together")
-        state_a, state_b, comp_a, comp_b = build_custom_systems(
-            args.ligand_a, args.ligand_b, args.protein, args.solvate
-        )
-        mapping = build_mapping(comp_a, comp_b)
-    else:
-        state_a, state_b, comp_a, comp_b = build_default_benzene_toluene_systems()
-        mapping = build_mapping(comp_a, comp_b)
-
-    # --- Build protocol settings -----------------------------------------
+    # --- Build protocol from CLI args ------------------------------------
     from feflow.protocols import NonEquilibriumSwitchingProtocol
 
     settings = NonEquilibriumSwitchingProtocol.default_settings()
@@ -195,6 +204,50 @@ def main():
     # work/traj save frequencies auto-derive from neq_steps if left as None
 
     protocol = NonEquilibriumSwitchingProtocol(settings=settings)
+
+    # --- Build / load chemical systems + mapping -------------------------
+    if args.molecules or args.network_json:
+        network_json = Path(args.network_json) if args.network_json else None
+
+        if args.molecules:
+            if network_json and network_json.exists():
+                print(f"Loading alchemical network from {network_json} ...")
+                alchemical_network = load_alchemical_network(network_json)
+            else:
+                alchemical_network = plan_alchemical_network(args.molecules, args.protein, protocol)
+                if network_json:
+                    save_alchemical_network(alchemical_network, network_json)
+                    print(f"Alchemical network saved to {network_json}")
+        else:
+            print(f"Loading alchemical network from {network_json} ...")
+            alchemical_network = load_alchemical_network(network_json)
+
+        if args.plan_only:
+            edges = list(alchemical_network.edges)
+            print(f"Network has {len(edges)} transformation(s). Done (--plan-only).")
+            return
+
+        edges = list(alchemical_network.edges)
+        if args.transformation_index >= len(edges):
+            raise SystemExit(
+                f"--transformation-index {args.transformation_index} is out of range "
+                f"(network has {len(edges)} edge(s))."
+            )
+        selected = edges[args.transformation_index]
+        state_a = selected.stateA
+        state_b = selected.stateB
+        mapping = selected.mapping
+
+    elif args.ligand_a or args.ligand_b:
+        if not (args.ligand_a and args.ligand_b):
+            parser.error("--ligand-a and --ligand-b must be given together")
+        state_a, state_b, comp_a, comp_b = build_custom_systems(
+            args.ligand_a, args.ligand_b, args.protein, args.solvate
+        )
+        mapping = build_mapping(comp_a, comp_b)
+    else:
+        state_a, state_b, comp_a, comp_b = build_default_benzene_toluene_systems()
+        mapping = build_mapping(comp_a, comp_b)
 
     # --- Create and execute the DAG --------------------------------------
     dag = protocol.create(
