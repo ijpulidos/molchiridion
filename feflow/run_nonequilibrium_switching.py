@@ -188,11 +188,11 @@ def main():
     parser.add_argument("--transformation-index", type=int, default=0, help="Index of the transformation to run from the network (network mode only)")
     parser.add_argument("--charge-method", type=str, default="am1bcc", choices=["am1bcc", "nagl"], help="Partial charge method used when planning the network (default: am1bcc)")
 
-    parser.add_argument("--num-switches", type=int, default=1, help="Number of forward/reverse NEQ switch replicates")
-    parser.add_argument("--eq-steps", type=int, default=250, help="Internal equilibration steps per endpoint")
-    parser.add_argument("--neq-steps", type=int, default=250, help="Nonequilibrium switching steps per replicate")
-    parser.add_argument("--temperature", type=float, default=300.0, help="Temperature in kelvin")
-    parser.add_argument("--platform", type=str, default="CUDA", choices=["CPU", "CUDA", "OpenCL", "HIP"], help="OpenMM compute platform")
+    parser.add_argument("--num-switches", type=int, default=None, help="Number of forward/reverse NEQ switch replicates (default: inherited from network JSON if loading, otherwise the protocol default)")
+    parser.add_argument("--eq-steps", type=int, default=None, help="Internal equilibration steps per endpoint (default: inherited from network JSON if loading, otherwise the protocol default)")
+    parser.add_argument("--neq-steps", type=int, default=None, help="Nonequilibrium switching steps per replicate (default: inherited from network JSON if loading, otherwise the protocol default)")
+    parser.add_argument("--temperature", type=float, default=None, help="Temperature in kelvin (default: inherited from network JSON if loading, otherwise the protocol default)")
+    parser.add_argument("--platform", type=str, default=None, choices=["CPU", "CUDA", "OpenCL", "HIP"], help="OpenMM compute platform (default: inherited from network JSON if loading, otherwise the protocol default)")
     parser.add_argument("--output-dir", type=str, default="neq_switching_run", help="Directory for shared/scratch protocol outputs")
 
     args = parser.parse_args()
@@ -207,11 +207,16 @@ def main():
     from feflow.protocols import NonEquilibriumSwitchingProtocol
 
     settings = NonEquilibriumSwitchingProtocol.default_settings()
-    settings.engine_settings.compute_platform = args.platform
-    settings.thermo_settings.temperature = args.temperature * unit.kelvin
-    settings.integrator_settings.equilibrium_steps = args.eq_steps
-    settings.integrator_settings.nonequilibrium_steps = args.neq_steps
-    settings.num_switches = args.num_switches
+    if args.platform is not None:
+        settings.engine_settings.compute_platform = args.platform
+    if args.temperature is not None:
+        settings.thermo_settings.temperature = args.temperature * unit.kelvin
+    if args.eq_steps is not None:
+        settings.integrator_settings.equilibrium_steps = args.eq_steps
+    if args.neq_steps is not None:
+        settings.integrator_settings.nonequilibrium_steps = args.neq_steps
+    if args.num_switches is not None:
+        settings.num_switches = args.num_switches
     # work/traj save frequencies auto-derive from neq_steps if left as None
 
     protocol = NonEquilibriumSwitchingProtocol(settings=settings)
@@ -249,6 +254,20 @@ def main():
         state_b = selected.stateB
         mapping = selected.mapping
 
+        # Use the embedded protocol's settings as the base, then apply any explicit CLI overrides
+        settings = selected.protocol.settings.unfrozen_copy()
+        if args.platform is not None:
+            settings.engine_settings.compute_platform = args.platform
+        if args.temperature is not None:
+            settings.thermo_settings.temperature = args.temperature * unit.kelvin
+        if args.eq_steps is not None:
+            settings.integrator_settings.equilibrium_steps = args.eq_steps
+        if args.neq_steps is not None:
+            settings.integrator_settings.nonequilibrium_steps = args.neq_steps
+        if args.num_switches is not None:
+            settings.num_switches = args.num_switches
+        protocol = NonEquilibriumSwitchingProtocol(settings=settings)
+
     elif args.ligand_a or args.ligand_b:
         if not (args.ligand_a and args.ligand_b):
             parser.error("--ligand-a and --ligand-b must be given together")
@@ -276,8 +295,8 @@ def main():
     shared.mkdir(parents=True, exist_ok=True)
     scratch.mkdir(parents=True, exist_ok=True)
 
-    print(f"Running {args.num_switches} forward + {args.num_switches} reverse switch(es) "
-          f"on platform={args.platform} ...")
+    print(f"Running {protocol.settings.num_switches} forward + {protocol.settings.num_switches} reverse switch(es) "
+          f"on platform={protocol.settings.engine_settings.compute_platform} ...")
     dag_result = execute_DAG(
         dag,
         shared_basedir=shared,
@@ -297,7 +316,11 @@ def main():
     estimate = protocol_result.get_estimate()
     uncertainty = protocol_result.get_uncertainty()
 
+    result_json = output_dir / "protocol_result.json"
+    protocol_result.to_json(result_json)
+
     print(f"\nOutputs written to: {output_dir.resolve()}")
+    print(f"Protocol result:  {result_json}")
     print(f"ddG estimate:    {estimate:.4f}")
     print(f"ddG uncertainty: {uncertainty:.4f}")
 
