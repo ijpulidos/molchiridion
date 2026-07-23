@@ -96,6 +96,15 @@ def _apply_cli_overrides(base_settings, *, platform, temperature, eq_steps, neq_
     )
 
 
+def _get_ligand_name(chemical_system):
+    """Return the name of the SmallMoleculeComponent in a ChemicalSystem, or 'unknown'."""
+    from gufe import SmallMoleculeComponent
+    for comp in chemical_system.components.values():
+        if isinstance(comp, SmallMoleculeComponent):
+            return comp.name
+    return "unknown"
+
+
 def build_default_benzene_toluene_systems():
     """Benzene -> toluene in vacuum, using gufe's bundled test molecules."""
     from importlib.resources import files, as_file
@@ -339,6 +348,13 @@ def main():
     shared.mkdir(parents=True, exist_ok=True)
     scratch.mkdir(parents=True, exist_ok=True)
 
+    ligand_a_name = _get_ligand_name(state_a)
+    ligand_b_name = _get_ligand_name(state_b)
+    run_info = {"ligand_a": ligand_a_name, "ligand_b": ligand_b_name}
+    run_info_path = output_dir / "run_info.json"
+    with open(run_info_path, "w") as fh:
+        json.dump(run_info, fh, indent=2)
+
     print(f"Running {protocol.settings.num_switches} forward + {protocol.settings.num_switches} reverse switch(es) "
           f"on platform={protocol.settings.engine_settings.compute_platform} ...")
     dag_result = execute_DAG(
@@ -364,6 +380,7 @@ def main():
     protocol_result.to_json(result_json)
 
     print(f"\nOutputs written to: {output_dir.resolve()}")
+    print(f"Run info:         {run_info_path}")
     print(f"Protocol result:  {result_json}")
     print(f"ddG estimate:    {estimate:.4f}")
     print(f"ddG uncertainty: {uncertainty:.4f}")
