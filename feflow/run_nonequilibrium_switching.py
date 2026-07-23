@@ -42,6 +42,58 @@ from openff.toolkit import RDKitToolkitWrapper, AmberToolsToolkitWrapper
 from openff.toolkit.utils.nagl_wrapper import NAGLToolkitWrapper
 from openff.toolkit.utils.toolkit_registry import toolkit_registry_manager, ToolkitRegistry
 from openff.units import unit
+from feflow.settings.nonequilibrium_switching import NonEquilibriumSwitchingSettings
+
+
+def _apply_cli_overrides(base_settings, *, platform, temperature, eq_steps, neq_steps, num_switches):
+    """
+    Return a new NonEquilibriumSwitchingSettings built from *base_settings* with
+    only the explicitly provided CLI overrides applied.
+
+    Reconstructing the object (rather than mutating it in place) ensures that:
+    - sub-model mutations can't be silently dropped by a frozen sub-model
+    - work_save_frequency and traj_save_frequency are always re-derived by the
+      validator from the *final* neq_steps, not the stale value baked in at
+      construction time of the base settings
+    """
+    int_updates = {}
+    if eq_steps is not None:
+        int_updates["equilibrium_steps"] = eq_steps
+    if neq_steps is not None:
+        int_updates["nonequilibrium_steps"] = neq_steps
+    integrator_settings = (
+        base_settings.integrator_settings.model_copy(update=int_updates)
+        if int_updates else base_settings.integrator_settings
+    )
+
+    thermo_settings = (
+        base_settings.thermo_settings.model_copy(update={"temperature": temperature * unit.kelvin})
+        if temperature is not None else base_settings.thermo_settings
+    )
+
+    engine_settings = (
+        base_settings.engine_settings.model_copy(update={"compute_platform": platform})
+        if platform is not None else base_settings.engine_settings
+    )
+
+    return NonEquilibriumSwitchingSettings(
+        forcefield_settings=base_settings.forcefield_settings,
+        thermo_settings=thermo_settings,
+        solvation_settings=base_settings.solvation_settings,
+        partial_charge_settings=base_settings.partial_charge_settings,
+        alchemical_settings=base_settings.alchemical_settings,
+        integrator_settings=integrator_settings,
+        engine_settings=engine_settings,
+        lambda_functions=base_settings.lambda_functions,
+        lambda0_snapshots=base_settings.lambda0_snapshots,
+        lambda1_snapshots=base_settings.lambda1_snapshots,
+        forcefield_cache=base_settings.forcefield_cache,
+        num_switches=num_switches if num_switches is not None else base_settings.num_switches,
+        setup_minimize=base_settings.setup_minimize,
+        store_minimized_pdb=base_settings.store_minimized_pdb,
+        # work_save_frequency and traj_save_frequency intentionally omitted so the
+        # model validator re-derives them from the (possibly updated) neq_steps
+    )
 
 
 def build_default_benzene_toluene_systems():
@@ -206,19 +258,14 @@ def main():
     # --- Build protocol from CLI args ------------------------------------
     from feflow.protocols import NonEquilibriumSwitchingProtocol
 
-    settings = NonEquilibriumSwitchingProtocol.default_settings()
-    if args.platform is not None:
-        settings.engine_settings.compute_platform = args.platform
-    if args.temperature is not None:
-        settings.thermo_settings.temperature = args.temperature * unit.kelvin
-    if args.eq_steps is not None:
-        settings.integrator_settings.equilibrium_steps = args.eq_steps
-    if args.neq_steps is not None:
-        settings.integrator_settings.nonequilibrium_steps = args.neq_steps
-    if args.num_switches is not None:
-        settings.num_switches = args.num_switches
-    # work/traj save frequencies auto-derive from neq_steps if left as None
-
+    settings = _apply_cli_overrides(
+        NonEquilibriumSwitchingProtocol.default_settings(),
+        platform=args.platform,
+        temperature=args.temperature,
+        eq_steps=args.eq_steps,
+        neq_steps=args.neq_steps,
+        num_switches=args.num_switches,
+    )
     protocol = NonEquilibriumSwitchingProtocol(settings=settings)
 
     # --- Build / load chemical systems + mapping -------------------------
@@ -226,7 +273,7 @@ def main():
         network_json = Path(args.network_json) if args.network_json else None
 
         if args.molecules:
-            if network_json and network_json.exists():
+            if not args.plan_only and network_json and network_json.exists():
                 print(f"Loading alchemical network from {network_json} ...")
                 alchemical_network = load_alchemical_network(network_json)
             else:
@@ -255,17 +302,14 @@ def main():
         mapping = selected.mapping
 
         # Use the embedded protocol's settings as the base, then apply any explicit CLI overrides
-        settings = selected.protocol.settings.unfrozen_copy()
-        if args.platform is not None:
-            settings.engine_settings.compute_platform = args.platform
-        if args.temperature is not None:
-            settings.thermo_settings.temperature = args.temperature * unit.kelvin
-        if args.eq_steps is not None:
-            settings.integrator_settings.equilibrium_steps = args.eq_steps
-        if args.neq_steps is not None:
-            settings.integrator_settings.nonequilibrium_steps = args.neq_steps
-        if args.num_switches is not None:
-            settings.num_switches = args.num_switches
+        settings = _apply_cli_overrides(
+            selected.protocol.settings,
+            platform=args.platform,
+            temperature=args.temperature,
+            eq_steps=args.eq_steps,
+            neq_steps=args.neq_steps,
+            num_switches=args.num_switches,
+        )
         protocol = NonEquilibriumSwitchingProtocol(settings=settings)
 
     elif args.ligand_a or args.ligand_b:
