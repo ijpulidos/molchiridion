@@ -42,7 +42,7 @@ python run_nonequilibrium_switching.py \
     --output-dir results/ligA_ligB/
 ```
 
-Add `--protein receptor.pdb` to include a protein; this also enables solvation automatically. Use `--solvate` without a protein for explicit solvent in the absence of a receptor.
+Add `--protein receptor.pdb` to include a protein; this also enables solvation automatically and triggers a **two-phase run** (see [Output files](#output-files) below). Use `--solvate` without a protein for explicit solvent in the absence of a receptor (single-phase).
 
 #### Multi-ligand network (recommended for production)
 
@@ -93,20 +93,45 @@ When loading from `--network-json`, all of the above are inherited from the embe
 
 ### Output files
 
-Each run produces the following in `--output-dir` (default: `neq_switching_run/`):
+The output layout depends on whether a protein is present.
+
+**Two-phase run** (protein + solvent — computes binding ΔΔG):
+
+Both the complex leg (protein + ligand + solvent) and the solvent leg (ligand + solvent) are run automatically and stored in separate subdirectories. The script prints ΔG for each leg and the combined binding ΔΔG = ΔG_complex − ΔG_solvent.
 
 ```
 neq_switching_run/
-├── run_info.json          # ligand names (used by analyze_switching_results.py)
+├── run_info.json               # ligand names and phases (used by analyze_switching_results.py)
+├── complex/
+│   ├── protocol_result.json    # complex-leg ProtocolResult with all work values
+│   ├── shared/
+│   │   └── ...SetupUnit.../
+│   │       ├── hybrid_topology_factory.pickle
+│   │       ├── forward_initial_<uuid>.npy
+│   │       ├── forward_final_<uuid>.npy
+│   │       ├── reverse_initial_<uuid>.npy
+│   │       └── reverse_final_<uuid>.npy
+│   └── scratch/
+└── solvent/
+    ├── protocol_result.json    # solvent-leg ProtocolResult with all work values
+    ├── shared/
+    └── scratch/
+```
+
+**Single-phase run** (no protein — hydration free energy difference or vacuum):
+
+```
+neq_switching_run/
+├── run_info.json          # ligand names and phases
 ├── protocol_result.json   # serialized ProtocolResult with all work values
 ├── shared/                # intermediate files kept from the protocol DAG
 │   └── ...SetupUnit.../
-│       ├── hybrid_topology_factory.pickle   # HybridTopologyFactory (needed for trajectories)
-│       ├── forward_initial_<uuid>.npy       # positions at start of each forward switch
-│       ├── forward_final_<uuid>.npy         # positions at end of each forward switch
-│       ├── reverse_initial_<uuid>.npy       # positions at start of each reverse switch
-│       └── reverse_final_<uuid>.npy         # ...
-└── scratch/               # temporary per-unit scratch files
+│       ├── hybrid_topology_factory.pickle
+│       ├── forward_initial_<uuid>.npy
+│       ├── forward_final_<uuid>.npy
+│       ├── reverse_initial_<uuid>.npy
+│       └── reverse_final_<uuid>.npy
+└── scratch/
 ```
 
 ---
@@ -161,7 +186,10 @@ python analyze_switching_results.py results/edge_0/ results/edge_1/ results/edge
     --output-dir plots/
 ```
 
-Each directory must contain `protocol_result.json` and `run_info.json` (both written by `run_nonequilibrium_switching.py`).
+Each directory must contain `run_info.json` (written by `run_nonequilibrium_switching.py`). The script automatically detects the run type from the directory layout:
+
+- **Two-phase run** (`complex/protocol_result.json` + `solvent/protocol_result.json` present): computes the binding free energy difference ΔΔG_binding = ΔG_complex − ΔG_solvent, with uncertainty propagated in quadrature (σ = √(σ_complex² + σ_solvent²)).
+- **Single-phase run** (`protocol_result.json` at the directory root): uses the result directly (e.g., relative hydration free energies).
 
 ### Options
 

@@ -96,6 +96,43 @@ def _apply_cli_overrides(base_settings, *, platform, temperature, eq_steps, neq_
     )
 
 
+def _run_phase(protocol, state_a, state_b, mapping, output_dir, label):
+    """Run one phase of the NEQ switching protocol and return the ProtocolResult."""
+    from gufe.protocols.protocoldag import execute_DAG
+
+    dag = protocol.create(
+        stateA=state_a,
+        stateB=state_b,
+        mapping=mapping,
+        name=f"NEQ switching run ({label})",
+    )
+    shared = output_dir / "shared"
+    scratch = output_dir / "scratch"
+    shared.mkdir(parents=True, exist_ok=True)
+    scratch.mkdir(parents=True, exist_ok=True)
+
+    print(
+        f"  [{label}] Running {protocol.settings.num_switches} forward + "
+        f"{protocol.settings.num_switches} reverse switch(es) "
+        f"on platform={protocol.settings.engine_settings.compute_platform} ..."
+    )
+    dag_result = execute_DAG(
+        dag,
+        shared_basedir=shared,
+        scratch_basedir=scratch,
+        keep_shared=True,
+        keep_scratch=True,
+    )
+
+    if not dag_result.ok():
+        print(f"Protocol DAG execution FAILED for {label} phase:")
+        for failure in dag_result.protocol_unit_failures:
+            print(f"  - {failure.name}: {failure.exception}")
+        raise SystemExit(1)
+
+    return protocol.gather([dag_result])
+
+
 def _get_ligand_name(chemical_system):
     """Return the name of the SmallMoleculeComponent in a ChemicalSystem, or 'unknown'."""
     from gufe import SmallMoleculeComponent
@@ -332,58 +369,67 @@ def main():
         state_a, state_b, comp_a, comp_b = build_default_benzene_toluene_systems()
         mapping = build_mapping(comp_a, comp_b)
 
-    # --- Create and execute the DAG --------------------------------------
-    dag = protocol.create(
-        stateA=state_a,
-        stateB=state_b,
-        mapping=mapping,
-        name="NEQ switching run",
-    )
-
-    from gufe.protocols.protocoldag import execute_DAG
+    # --- Run phase(s) and gather results -----------------------------------
+    import numpy as np
 
     output_dir = Path(args.output_dir)
-    shared = output_dir / "shared"
-    scratch = output_dir / "scratch"
-    shared.mkdir(parents=True, exist_ok=True)
-    scratch.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     ligand_a_name = _get_ligand_name(state_a)
     ligand_b_name = _get_ligand_name(state_b)
-    run_info = {"ligand_a": ligand_a_name, "ligand_b": ligand_b_name}
+
+    has_protein = "protein" in state_a.components
+    has_solvent = "solvent" in state_a.components
+
+    if has_protein and has_solvent:
+        # Two-phase RBFE: complex leg and solvent leg run separately.
+        # ΔΔG_binding = ΔG_complex - ΔG_solvent
+        phases = ["complex", "solvent"]
+
+        complex_result = _run_phase(
+            protocol, state_a, state_b, mapping, output_dir / "complex", "complex"
+        )
+        complex_result.to_json(output_dir / "complex" / "protocol_result.json")
+
+        solvent_a = gufe.ChemicalSystem(
+            {k: v for k, v in state_a.components.items() if k != "protein"}
+        )
+        solvent_b = gufe.ChemicalSystem(
+            {k: v for k, v in state_b.components.items() if k != "protein"}
+        )
+        solvent_result = _run_phase(
+            protocol, solvent_a, solvent_b, mapping, output_dir / "solvent", "solvent"
+        )
+        solvent_result.to_json(output_dir / "solvent" / "protocol_result.json")
+
+        ddg_complex = complex_result.get_estimate().to("kcal/mol")
+        ddg_solvent = solvent_result.get_estimate().to("kcal/mol")
+        unc_complex = complex_result.get_uncertainty().to("kcal/mol")
+        unc_solvent = solvent_result.get_uncertainty().to("kcal/mol")
+        ddg = ddg_complex - ddg_solvent
+        unc = np.sqrt(unc_complex.magnitude**2 + unc_solvent.magnitude**2) * unc_complex.units
+
+        print(f"\n  ΔG complex:  {ddg_complex:.4f}  ±  {unc_complex:.4f}")
+        print(f"  ΔG solvent:  {ddg_solvent:.4f}  ±  {unc_solvent:.4f}")
+        print(f"  ΔΔG binding: {ddg:.4f}  ±  {unc:.4f}")
+    else:
+        # Single-phase run (vacuum or solvated ligand without protein).
+        phases = ["single"]
+        result = _run_phase(protocol, state_a, state_b, mapping, output_dir, "single")
+        result_json = output_dir / "protocol_result.json"
+        result.to_json(result_json)
+        ddg = result.get_estimate().to("kcal/mol")
+        unc = result.get_uncertainty().to("kcal/mol")
+        print(f"\n  ddG estimate:    {ddg:.4f}")
+        print(f"  ddG uncertainty: {unc:.4f}")
+
+    run_info = {"ligand_a": ligand_a_name, "ligand_b": ligand_b_name, "phases": phases}
     run_info_path = output_dir / "run_info.json"
     with open(run_info_path, "w") as fh:
         json.dump(run_info, fh, indent=2)
 
-    print(f"Running {protocol.settings.num_switches} forward + {protocol.settings.num_switches} reverse switch(es) "
-          f"on platform={protocol.settings.engine_settings.compute_platform} ...")
-    dag_result = execute_DAG(
-        dag,
-        shared_basedir=shared,
-        scratch_basedir=scratch,
-        keep_shared=True,
-        keep_scratch=True,
-    )
-
-    if not dag_result.ok():
-        print("Protocol DAG execution FAILED:")
-        for failure in dag_result.protocol_unit_failures:
-            print(f"  - {failure.name}: {failure.exception}")
-        raise SystemExit(1)
-
-    # --- Gather and report -------------------------------------------------
-    protocol_result = protocol.gather([dag_result])
-    estimate = protocol_result.get_estimate()
-    uncertainty = protocol_result.get_uncertainty()
-
-    result_json = output_dir / "protocol_result.json"
-    protocol_result.to_json(result_json)
-
     print(f"\nOutputs written to: {output_dir.resolve()}")
-    print(f"Run info:         {run_info_path}")
-    print(f"Protocol result:  {result_json}")
-    print(f"ddG estimate:    {estimate:.4f}")
-    print(f"ddG uncertainty: {uncertainty:.4f}")
+    print(f"Run info: {run_info_path}")
 
 
 if __name__ == "__main__":
