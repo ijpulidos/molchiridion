@@ -153,22 +153,27 @@ def main():
         for m in _load_experimental(args.experimental):
             femap.add_measurement(m)
 
-    graph = femap._graph
-
-    from cinnabar.plotting import plot_DDGs, plot_DGs, plot_all_DDGs
-
-    # Always: all pairwise computed DDGs as a network plot
-    all_ddg_path = str(output_dir / "all_ddg.png")
-    plot_all_DDGs(
-        graph,
-        method_name=args.method_name,
-        target_name=args.target_name,
-        filename=all_ddg_path,
-    )
-    print(f"Saved: {all_ddg_path}")
+    # Always: draw the perturbation network topology
+    network_path = str(output_dir / "network.png")
+    femap.draw_graph(title=f"{args.target_name} ({args.method_name})", filename=network_path)
+    print(f"Saved: {network_path}")
 
     if has_experimental:
-        # Computed vs experimental DDGs (requires experimental absolute FEs)
+        from cinnabar.plotting import plot_DDGs, plot_DGs, plot_all_DDGs
+
+        graph = femap.to_legacy_graph()
+
+        # All pairwise computed vs experimental DDGs scatter
+        all_ddg_path = str(output_dir / "all_ddg.png")
+        plot_all_DDGs(
+            graph,
+            method_name=args.method_name,
+            target_name=args.target_name,
+            filename=all_ddg_path,
+        )
+        print(f"Saved: {all_ddg_path}")
+
+        # Computed vs experimental DDGs
         ddg_path = str(output_dir / "ddg.png")
         plot_DDGs(
             graph,
