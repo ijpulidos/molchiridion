@@ -178,6 +178,8 @@ def main():
         for m in _load_experimental(args.experimental):
             femap.add_measurement(m)
 
+    femap.generate_absolute_values()
+
     # Always: draw the perturbation network topology
     network_path = str(output_dir / "network.png")
     femap.draw_graph(title=f"{args.target_name} ({args.method_name})", filename=network_path)
@@ -186,12 +188,11 @@ def main():
     if has_experimental:
         from cinnabar.plotting import plot_DDGs, plot_DGs, plot_all_DDGs
 
-        graph = femap.to_legacy_graph()
-
         # All pairwise computed vs experimental DDGs scatter
         all_ddg_path = str(output_dir / "all_ddg.png")
         plot_all_DDGs(
-            graph,
+            femap,
+            "experiment",
             method_name=args.method_name,
             target_name=args.target_name,
             filename=all_ddg_path,
@@ -201,7 +202,8 @@ def main():
         # Computed vs experimental DDGs
         ddg_path = str(output_dir / "ddg.png")
         plot_DDGs(
-            graph,
+            femap,
+            "experiment",
             method_name=args.method_name,
             target_name=args.target_name,
             filename=ddg_path,
@@ -211,7 +213,8 @@ def main():
         # Absolute FEs: computed (MLE from network) vs experimental
         dg_path = str(output_dir / "dg.png")
         plot_DGs(
-            graph,
+            femap,
+            "experiment",
             method_name=args.method_name,
             target_name=args.target_name,
             filename=dg_path,
