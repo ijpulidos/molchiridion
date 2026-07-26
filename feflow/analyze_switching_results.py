@@ -62,7 +62,10 @@ def _build_femap(run_dirs, n_bootstraps):
     import numpy as np
     from cinnabar import FEMap, Measurement
 
-    femap = FEMap()
+    # First pass: collect all (ddg, unc) values per (ligand_a, ligand_b) pair
+    raw = {}
+    units = None
+
     for run_dir in run_dirs:
         print(f"  loading {run_dir} ...")
         info, result = _load_single_result(run_dir)
@@ -84,14 +87,36 @@ def _build_femap(run_dirs, n_bootstraps):
             ddg = result.get_estimate().to("kcal/mol")
             unc = result.get_uncertainty(n_bootstraps=n_bootstraps).to("kcal/mol")
 
-        m = Measurement(
-            labelA=info["ligand_a"],
-            labelB=info["ligand_b"],
-            DG=ddg,
-            uncertainty=unc,
+        if units is None:
+            units = ddg.units
+
+        key = (info["ligand_a"], info["ligand_b"])
+        raw.setdefault(key, []).append((ddg.magnitude, unc.magnitude))
+
+    # Second pass: inverse-variance weighted average for duplicate pairs
+    femap = FEMap()
+    for (label_a, label_b), entries in raw.items():
+        ddg_vals = np.array([e[0] for e in entries])
+        unc_vals = np.array([e[1] for e in entries])
+
+        if len(entries) == 1:
+            ddg_avg, unc_avg = ddg_vals[0], unc_vals[0]
+        else:
+            weights = 1.0 / unc_vals**2
+            ddg_avg = np.sum(weights * ddg_vals) / np.sum(weights)
+            unc_avg = 1.0 / np.sqrt(np.sum(weights))
+            print(
+                f"  {label_a} -> {label_b}: averaged {len(entries)} replicas "
+                f"=> DDG = {ddg_avg:.3f} +/- {unc_avg:.3f} kcal/mol"
+            )
+
+        femap.add_measurement(Measurement(
+            labelA=label_a,
+            labelB=label_b,
+            DG=ddg_avg * units,
+            uncertainty=unc_avg * units,
             computational=True,
-        )
-        femap.add_measurement(m)
+        ))
 
     return femap
 
