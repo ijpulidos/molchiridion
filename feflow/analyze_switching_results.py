@@ -188,33 +188,33 @@ def main():
     if has_experimental:
         from cinnabar.plotting import plot_DDGs, plot_DGs, plot_all_DDGs
 
-        # All pairwise computed vs experimental DDGs scatter
+        # All pairwise computed vs experimental DDGs scatter (uses MLE absolute values)
         all_ddg_path = str(output_dir / "all_ddg.png")
         plot_all_DDGs(
             femap,
-            "experiment",
+            "MLE",
             method_name=args.method_name,
             target_name=args.target_name,
             filename=all_ddg_path,
         )
         print(f"Saved: {all_ddg_path}")
 
-        # Computed vs experimental DDGs
+        # Computed vs experimental relative DDGs
         ddg_path = str(output_dir / "ddg.png")
         plot_DDGs(
             femap,
-            "experiment",
+            "",
             method_name=args.method_name,
             target_name=args.target_name,
             filename=ddg_path,
         )
         print(f"Saved: {ddg_path}")
 
-        # Absolute FEs: computed (MLE from network) vs experimental
+        # Absolute FEs: MLE-computed vs experimental
         dg_path = str(output_dir / "dg.png")
         plot_DGs(
             femap,
-            "experiment",
+            "MLE",
             method_name=args.method_name,
             target_name=args.target_name,
             filename=dg_path,
